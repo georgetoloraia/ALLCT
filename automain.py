@@ -6,7 +6,6 @@ import pandas as pd
 from securedFiles import config
 import talib
 
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -21,47 +20,92 @@ exchange = ccxt.binance({
 # Define commission rate
 commission_rate = 0.001  # 0.1%
 
-# Define profit target
-profit_target = 1.20  # 20% profit for aggressive trading
+# New coins monitoring
+initial_pairs = set()
+initial_prices = {}
 
-# profit_target = 1.10  # 10% profit
-# quote_currency = 'USDT'
-# initial_investment = 10.0  # USD
-# trailing_stop_loss_percentage = 10  # 10% trailing stop loss
-# stop_loss_threshold = 0.90  # 10% drop
-# short_ma_length = 5
-# long_ma_length = 20
-# rsi_period = 14  # User's RSI period
-# commission_rate = 0.001  # 0.1%
-
-# Fetch all tradeable pairs using the correct asynchronous call
-async def get_tradeable_pairs(quote_currency):
+async def fetch_initial_pairs():
     try:
-        if asyncio.iscoroutinefunction(exchange.load_markets):
-            await exchange.load_markets()
-        else:
-            exchange.load_markets()  # Call without await if it's not awaitable
-        return [symbol for symbol in exchange.symbols if quote_currency in symbol.split('/')]
+        await exchange.load_markets()
+        global initial_pairs
+        initial_pairs = set(exchange.symbols)
+        logger.info("Fetched initial trading pairs.")
     except Exception as e:
-        logger.error(f"Error loading markets: {e}")
-        return []
+        logger.error(f"Error fetching initial trading pairs: {e}")
 
+async def detect_newly_listed_coins():
+    try:
+        await exchange.load_markets()
+        current_pairs = set(exchange.symbols)
+        newly_listed_coins = current_pairs - initial_pairs
+        if newly_listed_coins:
+            logger.info(f"Newly listed coins detected: {newly_listed_coins}")
+            for pair in newly_listed_coins:
+                initial_price = await get_current_price(pair)
+                if initial_price:
+                    initial_prices[pair] = initial_price
+                    logger.info(f"Initial price for {pair}: {initial_price}")
+            global initial_pairs
+            initial_pairs = current_pairs  # Update initial pairs
+        return newly_listed_coins
+    except Exception as e:
+        logger.error(f"Error detecting newly listed coins: {e}")
+        return set()
 
-# Ensure that the 'close' method is correctly implemented
-async def close_exchange():
-    if hasattr(exchange, 'close'):
-        await exchange.close()
-    else:
-        logger.info("No need to close the exchange connection explicitly.")
+async def get_current_price(pair):
+    try:
+        ticker = await exchange.fetch_ticker(pair)
+        current_price = ticker['last']
+        logger.info(f"Current market price for {pair}: {current_price}")
+        return current_price
+    except Exception as e:
+        logger.error(f"Error fetching current price for {pair}: {e}")
+        return None
 
-def preprocess_data(df):
-    # Ensure all required columns are present and of the correct type
-    required_columns = ['open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in required_columns):
-        raise ValueError("DataFrame must contain open, high, low, close, and volume columns")
+async def get_balance(currency):
+    try:
+        balance = await exchange.fetch_balance()
+        available_balance = balance['free'][currency]
+        logger.info(f"Available balance for {currency}: {available_balance}")
+        return available_balance
+    except Exception as e:
+        logger.error(f"Error fetching balance for {currency}: {e}")
+        return 0
 
-    df = df.ffill().bfill()
-    return df
+async def place_market_order(pair, side, amount):
+    if amount <= 0:
+        logger.error(f"Invalid amount for {side} order: {amount}")
+        return None
+    try:
+        if side == 'buy':
+            order = await exchange.create_market_buy_order(pair, amount)
+        elif side == 'sell':
+            order = await exchange.create_market_sell_order(pair, amount)
+        logger.info(f"Market {side} order placed for {pair}: {amount} units at market price.")
+        return order
+    except Exception as e:
+        logger.error(f"An error occurred placing a {side} order for {pair}: {e}")
+        return None
+
+def calculate_net_profit(buy_price, sell_price):
+    gross_profit = sell_price / buy_price
+    net_profit = gross_profit * (1 - 2 * commission_rate)
+    return net_profit
+
+async def convert_to_usdt(pair):
+    try:
+        asset = pair.split('/')[0]
+        asset_balance = await get_balance(asset)
+        if asset_balance > 0:
+            order_result = await place_market_order(pair, 'sell', asset_balance)
+            if order_result:
+                logger.info(f"Converted {asset_balance} of {asset} to USDT")
+                return order_result
+        else:
+            logger.info(f"No {asset} balance to convert to USDT")
+    except Exception as e:
+        logger.error(f"An error occurred converting {pair} to USDT: {e}")
+    return None
 
 async def fetch_historical_prices(pair, limit=100):
     try:
@@ -92,7 +136,13 @@ async def fetch_historical_prices(pair, limit=100):
         logger.error(f"Error fetching historical prices for {pair}: {e}")
         return pd.DataFrame()
 
+def preprocess_data(df):
+    required_columns = ['open', 'high', 'low', 'close', 'volume']
+    if not all(col in df.columns for col in required_columns):
+        raise ValueError("DataFrame must contain open, high, low, close, and volume columns")
 
+    df = df.ffill().bfill()
+    return df
 
 def evaluate_trading_signals(df):
     if df.empty:
@@ -101,7 +151,6 @@ def evaluate_trading_signals(df):
 
     latest = df.iloc[-1]
 
-    # Define buy and sell conditions using additional indicators
     buy_conditions = [
         latest['close'] > latest['ema'],
         latest['close'] > latest['wma'],
@@ -114,14 +163,14 @@ def evaluate_trading_signals(df):
     ]
     
     sell_conditions = [
-        latest['close'] < latest['ema'],  # Price below EMA
-        latest['close'] < latest['wma'],  # Price below WMA
-        latest['trix'] < 0,  # TRIX negative
-        latest['close'] > latest['upper_band'],  # Price above upper Bollinger Band
-        latest['rsi'] > 70,  # RSI indicating overbought
-        latest['macd'] < latest['macd_signal'],  # MACD below Signal Line
-        latest['cci'] > 100,  # CCI indicating overbought
-        latest['slowk'] > 80 and latest['slowd'] > 80  # Stochastic Oscillator indicating overbought
+        latest['close'] < latest['ema'],
+        latest['close'] < latest['wma'],
+        latest['trix'] < 0,
+        latest['close'] > latest['upper_band'],
+        latest['rsi'] > 70,
+        latest['macd'] < latest['macd_signal'],
+        latest['cci'] > 100,
+        latest['slowk'] > 80 and latest['slowd'] > 80
     ]
 
     if all(buy_conditions):
@@ -132,130 +181,46 @@ def evaluate_trading_signals(df):
         return True, 'sell'
     return False, None
 
-
-# Get balance
-async def get_balance(currency):
-    try:
-        balance = await exchange.fetch_balance()
-        available_balance = balance['free'][currency]
-        logger.info(f"Available balance for {currency}: {available_balance}")
-        return available_balance
-    except Exception as e:
-        logger.error(f"Error fetching balance for {currency}: {e}")
-        return 0
-
-# Get current price
-async def get_current_price(pair):
-    try:
-        ticker = await exchange.fetch_ticker(pair)
-        current_price = ticker['last']
-        logger.info(f"Current market price for {pair}: {current_price}")
-        return current_price
-    except Exception as e:
-        logger.error(f"Error fetching current price for {pair}: {e}")
-        return None
-
-# Place Market Order
-async def place_market_order(pair, side, amount):
-    if amount <= 0:
-        logger.error(f"Invalid amount for {side} order: {amount}")
-        return None
-    try:
-        if side == 'buy':
-            order = await exchange.create_market_buy_order(pair, amount)
-        elif side == 'sell':
-            order = await exchange.create_market_sell_order(pair, amount)
-        logger.info(f"Market {side} order placed for {pair}: {amount} units at market price.")
-        return order
-    except Exception as e:
-        logger.error(f"An error occurred placing a {side} order for {pair}: {e}")
-        return None
-
-
-
-
-# Get the ATR value
-def get_atr(df):
-    return talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-
-# Calculate net profit after commission
-def calculate_net_profit(buy_price, sell_price):
-    gross_profit = sell_price / buy_price
-    net_profit = gross_profit * (1 - 2 * commission_rate)  # accounting for buy and sell commission
-    return net_profit
-
-async def convert_to_usdt(pair):
-    try:
-        asset = pair.split('/')[0]
-        asset_balance = await get_balance(asset)
-        if asset_balance > 0:
-            order_result = await place_market_order(pair, 'sell', asset_balance)
-            if order_result:
-                logger.info(f"Converted {asset_balance} of {asset} to USDT")
-                return order_result
-        else:
-            logger.info(f"No {asset} balance to convert to USDT")
-    except Exception as e:
-        logger.error(f"An error occurred converting {pair} to USDT: {e}")
-    return None
-
 async def trade():
-    pairs = await get_tradeable_pairs('USDT')
-    for pair in pairs:
-        try:
-            data = await fetch_historical_prices(pair)
-            if not data.empty:
-                signal, action = evaluate_trading_signals(data)
-                atr = get_atr(data)
-                latest = data.iloc[-1]
-                current_price = latest['close']
-                usdt_balance = await get_balance('USDT')
-
-                if signal:
-                    logger.info(f"Signal detected: {action.upper()} for {pair}")
-
-                    # Dynamic position sizing based on available balance
-                    available_balance = usdt_balance if action == 'buy' else await get_balance(pair.split('/')[0])
-                    investment_amount = available_balance * 0.5  # Use 50% of available balance for the trade
-
-                    if action == 'buy':
-                        amount = investment_amount / current_price
-                        order_result = await place_market_order(pair, 'buy', amount)
-                        if order_result:
-                            logger.info(f"Buy order placed for {amount} of {pair} at {current_price}")
-                            buy_price = current_price
-
-                            # Monitor for profit target
-                            while True:
-                                await asyncio.sleep(60)  # Check every minute
-                                current_price = await get_current_price(pair)
-                                if current_price:
-                                    net_profit = calculate_net_profit(buy_price, current_price)
-                                    if net_profit >= profit_target:
-                                        logger.info(f"Profit target reached for {pair}. Converting to USDT.")
-                                        await convert_to_usdt(pair)
-                                        break
-                    elif action == 'sell':
-                        asset = pair.split('/')[0]
-                        asset_balance = await get_balance(asset)
-                        if asset_balance < investment_amount:
-                            logger.warning(f"Insufficient {asset} balance. Available: {asset_balance}, Required: {investment_amount}")
-                            continue
-                        order_result = await place_market_order(pair, 'sell', asset_balance)
-                        if order_result:
-                            logger.info(f"Sell order placed for {asset_balance} of {pair} at {current_price}")
-                            await convert_to_usdt(pair)
-
-        except Exception as e:
-            logger.error(f"An error occurred while processing {pair}: {str(e)}")
-
-async def main():
+    await fetch_initial_pairs()
     while True:
         try:
-            await trade()
+            newly_listed_coins = await detect_newly_listed_coins()
+            for pair in newly_listed_coins:
+                while True:
+                    current_price = await get_current_price(pair)
+                    if pair in initial_prices and current_price:
+                        initial_price = initial_prices[pair]
+                        price_increase = (current_price - initial_price) / initial_price * 100
+
+                        if price_increase >= 1000:
+                            logger.info(f"{pair} has increased by {price_increase}% from its initial price of {initial_price}. Taking profit.")
+                            asset_balance = await get_balance(pair.split('/')[0])
+                            await place_market_order(pair, 'sell', asset_balance)
+                            await convert_to_usdt(pair)
+                            break
+
+                    # Fetch historical data and evaluate trading signals
+                    historical_data = await fetch_historical_prices(pair)
+                    signal, action = evaluate_trading_signals(historical_data)
+                    if signal:
+                        usdt_balance = await get_balance('USDT')
+                        if action == 'buy':
+                            amount_to_buy = usdt_balance / current_price
+                            await place_market_order(pair, 'buy', amount_to_buy)
+                        elif action == 'sell':
+                            asset = pair.split('/')[0]
+                            asset_balance = await get_balance(asset)
+                            await place_market_order(pair, 'sell', asset_balance)
+                            await convert_to_usdt(pair)
+                    
+                    await asyncio.sleep(60)  # Check every minute
         except Exception as e:
             logger.error(f"An error occurred during trading: {e}")
-        await asyncio.sleep(60)  # Wait for 1 minute before the next trading cycle
+            await asyncio.sleep(60)
+
+async def main():
+    await trade()
 
 if __name__ == "__main__":
     asyncio.run(main())

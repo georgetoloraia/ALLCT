@@ -7,13 +7,15 @@ import logging
 import pandas as pd
 from securedFiles import config
 # ------
-from src.ema import ema
-from src.wma import wma
-from src.bollinger_bands import bollinger_bands
-from src.vwap import vwap
-from src.avl import avl
-from src.trix import trix
-from src.sar import sar
+# from src.ema import ema
+# from src.wma import wma
+# from src.bollinger_bands import bollinger_bands
+# from src.vwap import vwap
+# from src.avl import avl
+# from src.trix import trix
+# from src.sar import sar
+
+import talib
 
 
 # Setup logging
@@ -75,7 +77,7 @@ def preprocess_data(df):
 
 async def fetch_historical_prices(pair, limit=100):
     try:
-        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=limit)
+        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='1m', limit=limit)
         if ohlcv is None or len(ohlcv) == 0:
             logger.info(f"No data returned for {pair}.")
             return pd.DataFrame()
@@ -86,13 +88,23 @@ async def fetch_historical_prices(pair, limit=100):
 
         df = preprocess_data(df)
 
-        df['ema'] = ema(df['close'], 14)
-        df['wma'] = wma(df['close'], 14)
-        df['upper_band'], df['lower_band'] = bollinger_bands(df['close'], 20, 2)
-        df['vwap'] = vwap(df['close'], df['volume'])
-        df['avl'] = avl(df['close'], df['volume'])
-        df['trix'] = trix(df['close'], 15)
-        # df['sar'] = sar(df['high'], df['low'])
+        df['ema'] = talib.EMA(df['close'], timeperiod=14)
+        df['wma'] = talib.WMA(df['close'], timeperiod=14)
+        df['upper_band'], df['middle_band'], df['lower_band'] = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
+        # df['vwap'] = talib.vwap(df['close'], df['volume'])  # No direct VWAP in TA-Lib
+        df['trix'] = talib.TRIX(df['close'], timeperiod=15)
+
+
+        # df['ema'] = ema(df['close'], 14)
+        
+        # df['wma'] = wma(df['close'], 14)
+        
+        # df['upper_band'], df['lower_band'] = bollinger_bands(df['close'], 20, 2)
+        
+        # df['vwap'] = vwap(df['close'], df['volume'])
+        # df['avl'] = avl(df['close'], df['volume'])
+        # df['trix'] = trix(df['close'], 15)
+        
 
         return df
     except Exception as e:
@@ -109,7 +121,7 @@ def evaluate_trading_signals(df):
         return False, None
 
     # Check for any NaN values in the required columns for trading decisions
-    required_columns = ['ema', 'wma', 'upper_band', 'lower_band', 'vwap', 'avl', 'trix'] #, 'sar'
+    required_columns = ['ema', 'wma', 'upper_band', 'lower_band', 'avl', 'trix'] #, 'sar'
     # if df[required_columns].isnull().any().any():
     #     logger.info("DataFrame contains NaN values in required columns.")
     #     return False, None
@@ -119,16 +131,16 @@ def evaluate_trading_signals(df):
     buy_conditions = [
         latest['close'] > latest['ema'],
         latest['close'] > latest['wma'],
-        latest['close'] > latest['vwap'],
+        # latest['close'] > latest['vwap'],
         latest['trix'] > 0,
         # latest['close'] > latest['sar'],
         latest['close'] < latest['lower_band']
     ]
-
+    
     sell_conditions = [
         latest['close'] < latest['ema'],
         latest['close'] < latest['wma'],
-        latest['close'] < latest['vwap'],
+        # latest['close'] < latest['vwap'],
         latest['trix'] < 0,
         # latest['close'] < latest['sar'],
         latest['close'] > latest['upper_band']
@@ -140,7 +152,6 @@ def evaluate_trading_signals(df):
     elif all(sell_conditions):
         logger.info(f"Sell signal conditions met: {dict(zip(required_columns + ['close > Upper Band'], sell_conditions))}")
         return True, 'sell'
-    print(f"\n-----------")
     return False, None
 
 
