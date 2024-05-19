@@ -18,7 +18,8 @@ exchange = ccxt.binance({
     'options': {'adjustForTimeDifference': True}
 })
 
-# Parameters
+
+profit_target = 1.10  # 10% profit
 quote_currency = 'USDT'
 initial_investment = 10.0  # USD
 trailing_stop_loss_percentage = 10  # 10% trailing stop loss
@@ -26,6 +27,7 @@ stop_loss_threshold = 0.90  # 10% drop
 short_ma_length = 5
 long_ma_length = 20
 rsi_period = 14  # User's RSI period
+commission_rate = 0.001  # 0.1%
 
 # Fetch all tradeable pairs using the correct asynchronous call
 async def get_tradeable_pairs(quote_currency):
@@ -165,11 +167,16 @@ async def place_market_order(pair, side, amount):
         return None
 
 
-# Define stop-loss threshold
 
 # Get the ATR value
 def get_atr(df):
     return talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+
+# Calculate net profit after commission
+def calculate_net_profit(buy_price, sell_price):
+    gross_profit = sell_price / buy_price
+    net_profit = gross_profit * (1 - 2 * commission_rate)  # accounting for buy and sell commission
+    return net_profit
 
 async def convert_to_usdt(pair, force=False):
     try:
@@ -209,10 +216,22 @@ async def trade():
                         order_result = await place_market_order(pair, 'buy', amount)
                         if order_result:
                             logger.info(f"Buy order placed for {amount} of {pair} at {current_price}")
+                            buy_price = current_price
 
-                            # Convert to USDT if ATR indicates high volatility
-                            if atr.iloc[-1] > atr.mean():
-                                await convert_to_usdt(pair)
+                            # Monitor for profit target and high volatility
+                            while True:
+                                await asyncio.sleep(60)  # Check every minute
+                                current_price = await get_current_price(pair)
+                                if current_price:
+                                    net_profit = calculate_net_profit(buy_price, current_price)
+                                    if net_profit >= profit_target:
+                                        logger.info(f"Profit target reached for {pair}. Converting to USDT.")
+                                        await convert_to_usdt(pair)
+                                        break
+                                    if atr.iloc[-1] > atr.mean():
+                                        logger.info(f"High volatility detected for {pair}. Converting to USDT.")
+                                        await convert_to_usdt(pair)
+                                        break
                     elif action == 'sell':
                         asset = pair.split('/')[0]
                         asset_balance = await get_balance(asset)
@@ -237,7 +256,6 @@ async def main():
         except Exception as e:
             logger.error(f"An error occurred during trading: {e}")
         await asyncio.sleep(60)  # Wait for 1 minute before the next trading cycle
-
 
 if __name__ == "__main__":
     asyncio.run(main())
