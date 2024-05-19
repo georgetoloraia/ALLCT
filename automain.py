@@ -25,15 +25,17 @@ initial_pairs = set()
 initial_prices = {}
 
 async def fetch_initial_pairs():
+    global initial_pairs
     try:
         await exchange.load_markets()
-        global initial_pairs
         initial_pairs = set(exchange.symbols)
         logger.info("Fetched initial trading pairs.")
     except Exception as e:
         logger.error(f"Error fetching initial trading pairs: {e}")
 
 async def detect_newly_listed_coins():
+    global initial_pairs
+    global initial_prices
     try:
         await exchange.load_markets()
         current_pairs = set(exchange.symbols)
@@ -45,7 +47,6 @@ async def detect_newly_listed_coins():
                 if initial_price:
                     initial_prices[pair] = initial_price
                     logger.info(f"Initial price for {pair}: {initial_price}")
-            global initial_pairs
             initial_pairs = current_pairs  # Update initial pairs
         return newly_listed_coins
     except Exception as e:
