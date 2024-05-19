@@ -18,16 +18,21 @@ exchange = ccxt.binance({
     'options': {'adjustForTimeDifference': True}
 })
 
-
-profit_target = 1.10  # 10% profit
-quote_currency = 'USDT'
-initial_investment = 10.0  # USD
-trailing_stop_loss_percentage = 10  # 10% trailing stop loss
-stop_loss_threshold = 0.90  # 10% drop
-short_ma_length = 5
-long_ma_length = 20
-rsi_period = 14  # User's RSI period
+# Define commission rate
 commission_rate = 0.001  # 0.1%
+
+# Define profit target
+profit_target = 1.20  # 20% profit for aggressive trading
+
+# profit_target = 1.10  # 10% profit
+# quote_currency = 'USDT'
+# initial_investment = 10.0  # USD
+# trailing_stop_loss_percentage = 10  # 10% trailing stop loss
+# stop_loss_threshold = 0.90  # 10% drop
+# short_ma_length = 5
+# long_ma_length = 20
+# rsi_period = 14  # User's RSI period
+# commission_rate = 0.001  # 0.1%
 
 # Fetch all tradeable pairs using the correct asynchronous call
 async def get_tradeable_pairs(quote_currency):
@@ -168,6 +173,7 @@ async def place_market_order(pair, side, amount):
 
 
 
+
 # Get the ATR value
 def get_atr(df):
     return talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
@@ -178,7 +184,7 @@ def calculate_net_profit(buy_price, sell_price):
     net_profit = gross_profit * (1 - 2 * commission_rate)  # accounting for buy and sell commission
     return net_profit
 
-async def convert_to_usdt(pair, force=False):
+async def convert_to_usdt(pair):
     try:
         asset = pair.split('/')[0]
         asset_balance = await get_balance(asset)
@@ -207,18 +213,19 @@ async def trade():
 
                 if signal:
                     logger.info(f"Signal detected: {action.upper()} for {pair}")
-                    if usdt_balance < initial_investment:
-                        logger.warning(f"Insufficient USDT to trade. Available: {usdt_balance}, Required: {initial_investment}")
-                        continue
 
-                    amount = initial_investment / current_price
+                    # Dynamic position sizing based on available balance
+                    available_balance = usdt_balance if action == 'buy' else await get_balance(pair.split('/')[0])
+                    investment_amount = available_balance * 0.5  # Use 50% of available balance for the trade
+
                     if action == 'buy':
+                        amount = investment_amount / current_price
                         order_result = await place_market_order(pair, 'buy', amount)
                         if order_result:
                             logger.info(f"Buy order placed for {amount} of {pair} at {current_price}")
                             buy_price = current_price
 
-                            # Monitor for profit target and high volatility
+                            # Monitor for profit target
                             while True:
                                 await asyncio.sleep(60)  # Check every minute
                                 current_price = await get_current_price(pair)
@@ -228,24 +235,17 @@ async def trade():
                                         logger.info(f"Profit target reached for {pair}. Converting to USDT.")
                                         await convert_to_usdt(pair)
                                         break
-                                    if atr.iloc[-1] > atr.mean():
-                                        logger.info(f"High volatility detected for {pair}. Converting to USDT.")
-                                        await convert_to_usdt(pair)
-                                        break
                     elif action == 'sell':
                         asset = pair.split('/')[0]
                         asset_balance = await get_balance(asset)
-                        if asset_balance < amount:
-                            logger.warning(f"Insufficient {asset} balance. Available: {asset_balance}, Required: {amount}")
+                        if asset_balance < investment_amount:
+                            logger.warning(f"Insufficient {asset} balance. Available: {asset_balance}, Required: {investment_amount}")
                             continue
-                        order_result = await place_market_order(pair, 'sell', amount)
+                        order_result = await place_market_order(pair, 'sell', asset_balance)
                         if order_result:
-                            logger.info(f"Sell order placed for {amount} of {pair} at {current_price}")
+                            logger.info(f"Sell order placed for {asset_balance} of {pair} at {current_price}")
                             await convert_to_usdt(pair)
 
-                # Stop-loss trigger
-                if action == 'buy' and current_price < latest['close'] * stop_loss_threshold:
-                    await convert_to_usdt(pair, force=True)
         except Exception as e:
             logger.error(f"An error occurred while processing {pair}: {str(e)}")
 
