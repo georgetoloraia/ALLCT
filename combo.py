@@ -21,6 +21,27 @@ exchange = ccxt.binance({
 combo_pair = 'COMBO/USDT'  # Focus on COMBO coin
 commission_rate = 0.001  # 0.1% commission
 
+# Fetch historical data and calculate technical indicators
+async def fetch_historical_prices(pair, limit=100):
+    try:
+        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='1m', limit=limit)
+        if ohlcv is None or len(ohlcv) == 0:
+            logger.info(f"No data returned for {pair}.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+
+        df['rsi'] = talib.RSI(df['close'], timeperiod=14)
+        df['macd'], df['macd_signal'], _ = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+        df['upper_band'], df['middle_band'], df['lower_band'] = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
+
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching historical prices for {pair}: {e}")
+        return pd.DataFrame()
+
 # Calculate net profit after commission
 def calculate_net_profit(buy_price, sell_price):
     gross_profit = sell_price / buy_price
@@ -77,6 +98,34 @@ async def place_market_order(pair, side, amount):
         logger.error(f"An error occurred placing a {side} order for {pair}: {e}")
         return None
 
+# Evaluate trading signals based on TA-Lib indicators
+def evaluate_trading_signals(df):
+    if df.empty:
+        logger.info("DataFrame is empty.")
+        return False, None
+
+    latest = df.iloc[-1]
+    
+    buy_conditions = [
+        latest['rsi'] < 30,  # RSI indicating oversold
+        latest['macd'] > latest['macd_signal'],  # MACD crossover
+        latest['close'] < latest['lower_band']  # Price below lower Bollinger Band
+    ]
+    
+    sell_conditions = [
+        latest['rsi'] > 70,  # RSI indicating overbought
+        latest['macd'] < latest['macd_signal'],  # MACD crossover
+        latest['close'] > latest['upper_band']  # Price above upper Bollinger Band
+    ]
+
+    if all(buy_conditions):
+        logger.info(f"Buy signal conditions met: {dict(zip(['rsi', 'macd', 'close < lower_band'], buy_conditions))}")
+        return True, 'buy'
+    elif all(sell_conditions):
+        logger.info(f"Sell signal conditions met: {dict(zip(['rsi', 'macd', 'close > upper_band'], sell_conditions))}")
+        return True, 'sell'
+    return False, None
+
 async def trade_combo():
     usdt_balance = await get_balance('USDT')
     combo_balance = await get_balance('COMBO')
@@ -102,13 +151,12 @@ async def trade_combo():
                         break
 
     elif combo_balance > 0:
-        buy_price = await get_current_price(combo_pair)
-
-        # Monitor for profit opportunities
+        data = await fetch_historical_prices(combo_pair)
         while True:
             await asyncio.sleep(60)  # Check every minute
-            current_price = await get_current_price(combo_pair)
-            if current_price:
+            signal, action = evaluate_trading_signals(data)
+            if action == 'sell':
+                current_price = await get_current_price(combo_pair)
                 net_profit = calculate_net_profit(buy_price, current_price)
                 if net_profit > 1:  # Profit condition (greater than initial investment)
                     logger.info(f"Profit opportunity detected for {combo_pair}. Converting to USDT.")
