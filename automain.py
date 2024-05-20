@@ -6,6 +6,7 @@ import pandas as pd
 from securedFiles import config
 import talib
 
+# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -17,21 +18,26 @@ exchange = ccxt.binance({
     'options': {'adjustForTimeDifference': True}
 })
 
-# Define commission rate
+# Parameters
+quote_currency = 'USDT'
+initial_investment = 10.0  # USD
+rsi_period = 14  # User's RSI period
 commission_rate = 0.001  # 0.1%
 
 # New coins monitoring
 initial_pairs = set()
 initial_prices = {}
 
-async def fetch_initial_pairs():
+async def fetch_initial_pairs(quote_currency):
     global initial_pairs
     try:
         await exchange.load_markets()
         initial_pairs = set(exchange.symbols)
         logger.info("Fetched initial trading pairs.")
+        return [symbol for symbol in exchange.symbols if quote_currency in symbol.split('/')]
     except Exception as e:
         logger.error(f"Error fetching initial trading pairs: {e}")
+        return []
 
 async def detect_newly_listed_coins():
     global initial_pairs
@@ -183,45 +189,45 @@ def evaluate_trading_signals(df):
     return False, None
 
 async def trade():
-    await fetch_initial_pairs()
+    pairs = await fetch_initial_pairs(quote_currency)
+    initial_usdt_balance = await get_balance('USDT')
+    logger.info(f"Initial USDT balance: {initial_usdt_balance}")
+
     while True:
         try:
             newly_listed_coins = await detect_newly_listed_coins()
             for pair in newly_listed_coins:
-                while True:
-                    current_price = await get_current_price(pair)
-                    if pair in initial_prices and current_price:
-                        initial_price = initial_prices[pair]
-                        price_increase = (current_price - initial_price) / initial_price * 100
-
+                current_price = await get_current_price(pair)
+                if current_price:
+                    initial_price = initial_prices.get(pair)
+                    if initial_price:
+                        price_increase = (current_price / initial_price - 1) * 100
                         if price_increase >= 1000:
-                            logger.info(f"{pair} has increased by {price_increase}% from its initial price of {initial_price}. Taking profit.")
+                            logger.info(f"Price increase detected for {pair}: {price_increase:.2f}% since initial price.")
                             asset_balance = await get_balance(pair.split('/')[0])
                             await place_market_order(pair, 'sell', asset_balance)
                             await convert_to_usdt(pair)
-                            break
+                            continue
 
-                    # Fetch historical data and evaluate trading signals
                     historical_data = await fetch_historical_prices(pair)
                     signal, action = evaluate_trading_signals(historical_data)
                     if signal:
-                        usdt_balance = await get_balance('USDT')
-                        if action == 'buy':
-                            amount_to_buy = usdt_balance / current_price
-                            await place_market_order(pair, 'buy', amount_to_buy)
-                        elif action == 'sell':
-                            asset = pair.split('/')[0]
-                            asset_balance = await get_balance(asset)
-                            await place_market_order(pair, 'sell', asset_balance)
+                        amount_to_invest = initial_usdt_balance * (1 - commission_rate)
+                        order_result = await place_market_order(pair, action, amount_to_invest)
+                        if order_result:
+                            logger.info(f"Order result: {order_result}")
+                            await asyncio.sleep(60)
                             await convert_to_usdt(pair)
-                    
-                    await asyncio.sleep(60)  # Check every minute
         except Exception as e:
-            logger.error(f"An error occurred during trading: {e}")
-            await asyncio.sleep(60)
-
-async def main():
-    await trade()
+            logger.error(f"Error in main trading loop: {e}")
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(trade())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.run_until_complete(exchange.close())
+        loop.close()

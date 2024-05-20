@@ -91,69 +91,65 @@ async def fetch_historical_prices(pair, limit=100):
         df['ema'] = talib.EMA(df['close'], timeperiod=14)
         df['wma'] = talib.WMA(df['close'], timeperiod=14)
         df['upper_band'], df['middle_band'], df['lower_band'] = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
-        # df['vwap'] = talib.vwap(df['close'], df['volume'])  # No direct VWAP in TA-Lib
         df['trix'] = talib.TRIX(df['close'], timeperiod=15)
-
-
-        # df['ema'] = ema(df['close'], 14)
-        
-        # df['wma'] = wma(df['close'], 14)
-        
-        # df['upper_band'], df['lower_band'] = bollinger_bands(df['close'], 20, 2)
-        
-        # df['vwap'] = vwap(df['close'], df['volume'])
-        # df['avl'] = avl(df['close'], df['volume'])
-        # df['trix'] = trix(df['close'], 15)
-        
+        df['rsi'] = talib.RSI(df['close'], timeperiod=14)
+        df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+        df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+        df['slowk'], df['slowd'] = talib.STOCH(df['high'], df['low'], df['close'], fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
+        df['cci'] = talib.CCI(df['high'], df['low'], df['close'], timeperiod=14)
+        df['obv'] = talib.OBV(df['close'], df['volume'])
 
         return df
     except Exception as e:
         logger.error(f"Error fetching historical prices for {pair}: {e}")
         return pd.DataFrame()
 
+def preprocess_data(df):
+    required_columns = ['open', 'high', 'low', 'close', 'volume']
+    if not all(col in df.columns for col in required_columns):
+        raise ValueError("DataFrame must contain open, high, low, close, and volume columns")
+
+    df = df.ffill().bfill()
+    return df
 
 
 
-# Evaluate Trading Signal
 def evaluate_trading_signals(df):
     if df.empty:
         logger.info("DataFrame is empty.")
         return False, None
 
-    # Check for any NaN values in the required columns for trading decisions
-    required_columns = ['ema', 'wma', 'upper_band', 'lower_band', 'avl', 'trix'] #, 'sar'
-    # if df[required_columns].isnull().any().any():
-    #     logger.info("DataFrame contains NaN values in required columns.")
-    #     return False, None
-    
     latest = df.iloc[-1]
 
     buy_conditions = [
         latest['close'] > latest['ema'],
         latest['close'] > latest['wma'],
-        # latest['close'] > latest['vwap'],
         latest['trix'] > 0,
-        # latest['close'] > latest['sar'],
-        latest['close'] < latest['lower_band']
+        latest['close'] < latest['lower_band'],
+        latest['rsi'] < 30,
+        latest['macd'] > latest['macd_signal'],
+        latest['cci'] < -100,
+        latest['slowk'] < 20 and latest['slowd'] < 20
     ]
     
     sell_conditions = [
         latest['close'] < latest['ema'],
         latest['close'] < latest['wma'],
-        # latest['close'] < latest['vwap'],
         latest['trix'] < 0,
-        # latest['close'] < latest['sar'],
-        latest['close'] > latest['upper_band']
+        latest['close'] > latest['upper_band'],
+        latest['rsi'] > 70,
+        latest['macd'] < latest['macd_signal'],
+        latest['cci'] > 100,
+        latest['slowk'] > 80 and latest['slowd'] > 80
     ]
 
     if all(buy_conditions):
-        logger.info(f"Buy signal conditions met: {dict(zip(required_columns + ['close < Lower Band'], buy_conditions))}")
+        logger.info(f"Buy signal conditions met: {dict(zip(['ema', 'wma', 'trix', 'close < Lower Band', 'rsi', 'macd', 'cci', 'stoch'], buy_conditions))}")
         return True, 'buy'
     elif all(sell_conditions):
-        logger.info(f"Sell signal conditions met: {dict(zip(required_columns + ['close > Upper Band'], sell_conditions))}")
+        logger.info(f"Sell signal conditions met: {dict(zip(['ema', 'wma', 'trix', 'close > Upper Band', 'rsi', 'macd', 'cci', 'stoch'], sell_conditions))}")
         return True, 'sell'
     return False, None
-
 
 # Get balance
 async def get_balance(currency):
